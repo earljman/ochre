@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent board write API + sign-in (loopback only)
+After=network.target
+[Service]
+User=YOUR_USER
+Environment=FM_HOME=/path/to/firstmate-home
+Environment=BOARD_CONFIG=/path/to/board/config.toml
+ExecStart=/usr/bin/python3 /path/to/board/board/boardapi.py
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

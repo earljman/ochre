@@ -1,0 +1,12 @@
+[project]
+name = "ochre"
+version = "0.1.0"
+description = "Ochre - a live status board for a Firstmate dev team of AI coding agents"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Earl Justin M" }]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/earljman/ochre"

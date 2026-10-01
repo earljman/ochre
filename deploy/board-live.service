@@ -1,0 +1,9 @@
+[Unit]
+Description=Agent board live refresh (worker state only; no model calls)
+[Service]
+Type=oneshot
+User=YOUR_USER
+Environment=FM_HOME=/path/to/firstmate-home
+Environment=BOARD_CONFIG=/path/to/board/config.toml
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /path/to/board/board/generate.py --live

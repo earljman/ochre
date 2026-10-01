@@ -1,0 +1,21 @@
+# Copy to config.toml (or point BOARD_CONFIG at it). Every key can also be set as an
+# environment variable: BOARD_<KEY in upper case>, and FM_HOME for fm_home.
+fm_home = "/path/to/firstmate-home"     # default: ./sample/home (fake data)
+out = "/var/www/board/index.html"       # default: ./out/index.html
+title = "Ochre"
+subtitle = "Status board for a Firstmate dev team"
+agent_name = "Board agent"              # named in automated Jira comments
+owner_name = "the team lead"            # the person the agent works for
+key_prefix = "ABC"                      # ticket keys look like ABC-123
+gh_repo = "your-org/your-app"
+gh_author = "your-agent-github-login"
+jira_site = "https://your-site.atlassian.net"
+jira_transition_pr_submitted = "13"     # your workflow's transition ids
+jira_transition_merged = "12"
+focus_milestones = "M1,M2"              # never paused by the resource gate
+rules_dir = "team-rules"                # <fm_home>/data/<rules_dir>
+rules_sync_dir = "team-rules-sync"
+storage_prefix = "board"
+board_service = "board.service"
+slack_channel = ""                      # rules sync: channel id for version announcements
+slack_canvases = ""                     # "FILEID:1-rules.md:Rules,FILEID:2-blockers.md:Blockers"

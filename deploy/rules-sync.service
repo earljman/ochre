@@ -1,0 +1,7 @@
+[Unit]
+Description=Team rules sync (Slack canvases -> data/<rules_dir>; no model calls)
+[Service]
+Type=oneshot
+Environment=FM_HOME=/path/to/firstmate-home
+Environment=BOARD_CONFIG=/path/to/board/config.toml
+ExecStart=/usr/bin/python3 /path/to/board/rules_sync/sync.py

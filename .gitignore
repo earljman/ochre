@@ -1,0 +1,15 @@
+# outputs and runtime data
+out/
+sample/home/
+*.log
+*.jsonl
+__pycache__/
+*.pyc
+# local config and secrets
+config.toml
+.env
+config/board-password
+config/board-session-secret
+*.pem
+*.key
+*.crt
