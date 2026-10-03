@@ -5,7 +5,7 @@ description = "Ochre - a live status board for a Firstmate dev team of AI coding
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Earl Justin M" }]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = []
 
 [project.urls]

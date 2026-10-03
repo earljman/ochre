@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.ochre.board-live</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>/path/to/ochre/board/generate.py</string>
+    <string>--live</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FM_HOME</key><string>/path/to/firstmate-home</string>
+    <key>BOARD_CONFIG</key><string>/path/to/ochre/config.toml</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <!-- Live refresh every 30 seconds: worker state only, reuses the last full run's GitHub data. -->
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/YOUR_USER/Library/Logs/dev.ochre.board-live.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USER/Library/Logs/dev.ochre.board-live.log</string>
+</dict>
+</plist>

@@ -34,7 +34,7 @@ If your shell exports `FM_HOME`, unset it first or the generator reads that home
 3. For the sign-in page, create `<fm_home>/config/board-password` (a line `password=...`) and `<fm_home>/config/board-session-secret` (random bytes).
 4. Install the units in `deploy/` (full refresh every 2 minutes, live refresh every 30 seconds, the loopback API, the rules sync) and the `deploy/nginx.conf` front, replacing the `/path/to/...` placeholders.
 
-Requirements: Python 3.9+, `gh` (authenticated) for PR data, and `no-mistakes` on the PATH for the pipeline strip. Both are optional - the board says which source it could not read instead of failing.
+Requirements: Python 3.12+, `gh` (authenticated) for PR data, and `no-mistakes` on the PATH for the pipeline strip. Both are optional - the board says which source it could not read instead of failing.
 
 ## What it reads from a Firstmate home
 
@@ -49,6 +49,31 @@ Requirements: Python 3.9+, `gh` (authenticated) for PR data, and `no-mistakes` o
 | `gh pr list` for the configured repo and author (cached in `data/board/prs.json`) | PR states, throughput and cycle time |
 | `data/board/usage.json` (written by `board/usage.py` from local agent session logs) | usage charts |
 | `data/<rules_dir>/` and `data/<rules_sync_dir>/README.md` | the Rules section |
+
+## Running on a main home
+
+A main Firstmate home (for example a Mac mini) can serve one fleet-wide board. Set `profile = "main"` and the board draws only what the home actually has:
+
+- The Queue, Rules and History panels (and the cap/tmp gate figures) appear only when their source files exist (`data/board/queue.json`, the rules files under `data/`, `tickets.jsonl` / `events.jsonl`, `cap.json` / `tmp.json`). No empty frames.
+- Cards key on the task id when a task has no ticket key, and a PR is matched to its task by branch name.
+- The Jira sync and the cap gate (Linux ops scripts) are not run.
+- `repo`/`gh_repos` can list several GitHub repos (`gh_repos = ["org/app-one", "org/app-two"]`); results are merged and each task's repo comes from its own record (`repo`, the meta file, a matching `project`, or its PR URL).
+- A **Second mates** section lists every second mate in the snapshot's `secondmate_current` block (from `bin/fm-fleet-snapshot.sh --json`): active, queued, decisions open, landed and how fresh the data is, or "no data" when its home could not be read. A second mate that keeps its own board links to it from `secondmate_boards = "id=https://its-board-url"`; nothing is hard-coded.
+
+Try it on fake data: `python3 sample/make_sample_main.py`, then `BOARD_PROFILE=main FM_HOME=sample/home-main python3 board/generate.py --fast`.
+
+### macOS (launchd)
+
+Live-worker detection reads `/proc` where it exists and otherwise `lsof`: a `claude`, `pi` or `node` process counts only when its working folder is a recorded task worktree.
+
+1. Copy `config.example.toml` to `config.toml` and set `fm_home`, `out` (for example `/path/to/ochre/out/index.html`), `profile = "main"`, `gh_repo`/`gh_repos`, `gh_author` and, if you use them, `secondmate_boards`. `gh` must be authenticated.
+2. Copy the plists from `deploy/` to `~/Library/LaunchAgents/` and replace `/path/to/...` and `YOUR_USER` (use a Python 3.12+ interpreter such as Homebrew's):
+   - `dev.ochre.board.plist` - full refresh every 2 minutes
+   - `dev.ochre.board-live.plist` - live refresh every 30 seconds
+   - `dev.ochre.board-serve.plist` - read-only page server (`board/serve.py`)
+3. Load them: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ochre.board.plist` (and the other two).
+
+The page has no sign-in, so it must never be public. `serve.py` binds `127.0.0.1:8780` by default and refuses `0.0.0.0` / `::`. To reach it from other devices on your Tailnet, set `bind` in `config.toml` to the machine's Tailnet address (`tailscale ip -4`) and keep the port closed to everything else. The queue write API and its sign-in (`boardapi.py`) are not used.
 
 ## Ops scripts
 

@@ -19,3 +19,10 @@ storage_prefix = "board"
 board_service = "board.service"
 slack_channel = ""                      # rules sync: channel id for version announcements
 slack_canvases = ""                     # "FILEID:1-rules.md:Rules,FILEID:2-blockers.md:Blockers"
+
+# --- main-home profile (see README, "Running on a main home") ---
+# profile = "main"                      # default "team"
+# gh_repos = ["your-org/app-one", "your-org/app-two"]   # several repos; overrides gh_repo
+# secondmate_boards = "pel-dev-team=https://board.example.com"   # id=url: a second mate that keeps its own board
+# bind = "127.0.0.1"                    # board/serve.py address; set a Tailnet address to opt in
+# port = 8780
