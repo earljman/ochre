@@ -16,6 +16,10 @@ _DEFAULTS = {
     "fm_home": os.path.join(_ROOT, "sample", "home"),
     # Where the rendered board is written.
     "out": os.path.join(_ROOT, "out", "index.html"),
+    # "team" renders every panel (the original single-team board); "main" is for a main
+    # Firstmate home: the Queue, cap/tmp gate, Rules and History panels are hidden when their
+    # source files are absent, no Jira/ops scripts run, and cards key on task id.
+    "profile": "team",
     # Page header text.
     "title": "Ochre",
     "subtitle": "Status board for a Firstmate dev team",
@@ -28,6 +32,13 @@ _DEFAULTS = {
     # GitHub repository (owner/name) and the account that opens the agent's PRs.
     "gh_repo": "example-org/example-app",
     "gh_author": "example-bot",
+    # Several repositories: comma-separated owner/name list (or a TOML array). Overrides gh_repo.
+    "gh_repos": "",
+    # Board URLs of second mates that keep their own board: comma-separated id=url pairs.
+    "secondmate_boards": "",
+    # Address and port of board/serve.py. Loopback by default; set a Tailnet address to opt in.
+    "bind": "127.0.0.1",
+    "port": "8780",
     # Jira site base URL (no trailing slash) used for ticket links and the REST API.
     "jira_site": "https://example.atlassian.net",
     # Jira transition ids used by ops/jira_pr_sync.py.
@@ -48,6 +59,13 @@ _DEFAULTS = {
 }
 
 
+def _flat(v):
+    """TOML arrays become comma-separated strings; everything else becomes a string."""
+    if isinstance(v, (list, tuple)):
+        return ",".join(str(x) for x in v)
+    return str(v)
+
+
 def _load_file():
     path = os.environ.get("BOARD_CONFIG", os.path.join(_ROOT, "config.toml"))
     if not os.path.exists(path):
@@ -61,10 +79,10 @@ def _load_file():
                 line = line.split("#", 1)[0].strip()
                 if "=" in line:
                     k, _, v = line.partition("=")
-                    out[k.strip()] = v.strip().strip('"').strip("'")
+                    out[k.strip()] = _flat(v.strip().strip('"').strip("'"))
         return out
     with open(path, "rb") as f:
-        return {k: str(v) for k, v in tomllib.load(f).items()}
+        return {k: _flat(v) for k, v in tomllib.load(f).items()}
 
 
 _FILE = _load_file()
@@ -80,6 +98,27 @@ KEY = get("key_prefix")
 KEY_RE = rf"{KEY}-\d+"
 JIRA_SITE = get("jira_site").rstrip("/")
 JIRA_BROWSE = JIRA_SITE + "/browse/"
+PROFILE = get("profile").strip().lower()
+if PROFILE not in ("team", "main"):
+    raise ValueError(f'profile must be "team" or "main", not {PROFILE!r}')
 GH_REPO = get("gh_repo")
 GH_AUTHOR = get("gh_author")
 FOCUS = [m.strip() for m in get("focus_milestones").split(",") if m.strip()]
+
+
+def parse_repos(value):
+    """Comma/space separated owner/name list -> unique repos in order. Raises on a malformed entry."""
+    import re
+    out = []
+    for part in re.split(r"[,\s]+", str(value or "").strip()):
+        if not part:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", part):
+            raise ValueError(f"not an owner/name repository: {part!r}")
+        if part not in out:
+            out.append(part)
+    return out
+
+
+GH_REPOS = parse_repos(get("gh_repos")) or [GH_REPO]
+GH_REPO = GH_REPOS[0]

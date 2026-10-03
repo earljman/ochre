@@ -13,3 +13,4 @@ config/board-session-secret
 *.pem
 *.key
 *.crt
+sample/home-main/

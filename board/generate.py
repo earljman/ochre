@@ -4,7 +4,7 @@
 Renders one static HTML page from a Firstmate home's durable records only:
   - bin/fm-fleet-snapshot.sh --json   -> workers, their state feed and recorded PRs
   - state/<id>.meta                   -> each worker's real model and effort
-  - /proc                             -> which worker agents are actually running
+  - /proc (or lsof where there is none) -> which worker agents are actually running
   - bin/fm-tasks-axi.sh list          -> backlog (queued work)
   - data/board/queue.json             -> the captain's ordered candidate queue
   - data/board/tickets.jsonl          -> tickets this home picked / opened PRs for / saw closed
@@ -19,6 +19,7 @@ Usage: generate.py [--fast] [--out PATH]   (default: config out)
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import config as C
+import fleetlib as FL
 REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import base64, csv, html, io, json, os, re, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
@@ -30,7 +31,9 @@ FAST = "--fast" in sys.argv or LIVE  # queue edits: reuse the slow sources cache
 if "--out" in sys.argv:
     OUT = sys.argv[sys.argv.index("--out") + 1]
 SRC_CACHE = f"{H}/data/board/.sources-cache.json"
-REPO = C.GH_REPO
+REPOS = C.GH_REPOS
+REPO = REPOS[0]
+MAIN = C.PROFILE == "main"           # main-home profile: panels without a source file are not drawn
 JIRA = C.JIRA_BROWSE
 CARDS_PER_LANE = 3
 FAILED = []  # names of sources that could not be read
@@ -54,6 +57,13 @@ def jread(path, default):
     except ValueError:
         FAILED.append(os.path.basename(path))
         return default
+
+
+def meta_field(tid, key):
+    for ln in (read(f"{H}/state/{tid}.meta") or "").splitlines():
+        if ln.startswith(key + "="):
+            return ln.split("=", 1)[1].strip()
+    return ""
 
 
 def run(cmd, timeout=60):
@@ -177,10 +187,12 @@ if not _use_cache and snap.get("tasks") is not None and "fleet snapshot" not in 
 queue = jread(f"{H}/data/board/queue.json", {})
 qitems = [i for i in (queue.get("items") or []) if isinstance(i, dict) and i.get("key")]
 fleet = jread(f"{H}/data/board/fleet.json", {})
-if not FAST:
+if not FAST and not MAIN:  # Jira sync and the cap gate are team-home ops scripts
     subprocess.run([sys.executable, os.path.join(REPO_ROOT, "ops", "jira_pr_sync.py")], env=dict(os.environ, FM_HOME=H), timeout=120, check=False, capture_output=True)
     subprocess.run([sys.executable, os.path.join(REPO_ROOT, "ops", "cap_gate.py")], env=dict(os.environ, FM_HOME=H), timeout=90, check=False, capture_output=True)
 CAPG = jread(f"{H}/data/board/cap.json", {})
+CAP_KNOWN = bool(CAPG.get("effective") or fleet.get("ship_slots"))
+SHOW_CAP = CAP_KNOWN or not MAIN
 CAPACITY = int(CAPG.get("effective") or fleet.get("ship_slots") or 3)
 
 tickets = []
@@ -244,22 +256,34 @@ def pr_state_from(event):
 
 
 def pr_ledger():
-    """All of this team's PRs from GitHub (full refresh only; --live/--fast read the cache)."""
+    """All of this team's PRs from every configured repo (full refresh only; --live/--fast read the cache)."""
     path = f"{H}/data/board/prs.json"
-    if not FAST:
+    cached = (jread(path, {}) or {}).get("prs") or []
+    if FAST:
+        return cached
+    merged, failed = [], []
+    for repo in REPOS:
         try:
-            p = run(["gh", "pr", "list", "-R", REPO, "--author", C.GH_AUTHOR, "--state", "all", "--limit", "100",
+            p = run(["gh", "pr", "list", "-R", repo, "--author", C.GH_AUTHOR, "--state", "all", "--limit", "100",
                      "--json", "number,title,state,isDraft,createdAt,mergedAt,closedAt,headRefName,url"], 60)
             data = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else None
-            if isinstance(data, list):
-                with open(path + ".tmp", "w") as f:
-                    json.dump({"fetched_at": time.time(), "prs": data}, f)
-                os.replace(path + ".tmp", path)
-                return data
         except Exception:  # noqa: BLE001
+            data = None
+        if isinstance(data, list):
+            merged += [dict(x, repo=repo) for x in data]
+        else:  # keep this repo's last known PRs rather than dropping them
+            failed.append(repo)
+            merged += [x for x in cached if x.get("repo") == repo or (not x.get("repo") and len(REPOS) == 1)]
+    if failed:
+        FAILED.append("GitHub PRs" + (" (%s)" % ", ".join(failed) if len(REPOS) > 1 else ""))
+    if len(failed) < len(REPOS):
+        try:
+            with open(path + ".tmp", "w") as f:
+                json.dump({"fetched_at": time.time(), "prs": merged}, f)
+            os.replace(path + ".tmp", path)
+        except OSError:
             pass
-        FAILED.append("GitHub PRs")
-    return (jread(path, {}) or {}).get("prs") or []
+    return merged
 
 
 def pr_key(pr):
@@ -268,6 +292,23 @@ def pr_key(pr):
 
 
 LEDGER = pr_ledger()
+# Branch -> task id, so a PR whose title carries no ticket key still lands on its task's card.
+BRANCH_TASK = {}
+for _t in snap.get("tasks") or []:
+    if isinstance(_t, dict) and _t.get("id") and _t.get("branch"):
+        BRANCH_TASK.setdefault(str(_t["branch"]), []).append(_t)
+
+
+def pr_ref(pr):
+    """What a PR's card is keyed on: its ticket key, else the task id whose branch it came from."""
+    k = pr_key(pr)
+    if k:
+        return k
+    for t in BRANCH_TASK.get(pr.get("headRefName") or "", []):
+        repo = FL.task_repo(t, meta_field(t["id"], "repo"), REPOS)
+        if not repo or not pr.get("repo") or repo == pr["repo"]:
+            return str(t["id"])
+    return ""
 
 
 prs = {}  # ticket -> {pr_url: state}, ordered by event time
@@ -285,7 +326,7 @@ for it in qitems:
     if it.get("pr"):
         prs.setdefault(it["key"], {}).setdefault(it["pr"], it.get("pr_state") or "open")
 for _pr in sorted(LEDGER, key=lambda x: x.get("createdAt") or ""):  # GitHub is the source of truth for PR state
-    _k = pr_key(_pr)
+    _k = pr_ref(_pr)
     if _k:
         _st = "merged" if _pr.get("state") == "MERGED" else "closed" if _pr.get("state") == "CLOSED" else ("draft" if _pr.get("isDraft") else "open")
         _d = prs.setdefault(_k, {})
@@ -300,36 +341,27 @@ def worker_ticket(tid):
     return m.group(1).upper() if m else ""
 
 
-def live_agent_cwds():
-    """Working folders of running worker agents: pi anywhere, claude/node only inside a recorded task worktree."""
+def worker_ref(tid):
+    """Identity a worker's card and PRs are keyed on: its ticket key, else its task id."""
+    return worker_ticket(tid) or tid or ""
+
+
+def live_agent_worktrees():
+    """Recorded task worktrees with a running worker agent (claude / pi / node) whose cwd is that worktree."""
     import glob as _glob
     wts = set()
     for m in _glob.glob(f"{H}/state/*.meta"):
         for ln in (read(m) or "").splitlines():
             if ln.startswith("worktree="):
-                wts.add(os.path.realpath(ln[9:]))
-    out = set()
-    for d in os.listdir("/proc"):
-        if d.isdigit():
-            try:
-                comm = open(f"/proc/{d}/comm").read().strip()
-                if comm in ("pi", "claude", "node"):
-                    cwd = os.readlink(f"/proc/{d}/cwd")
-                    if comm == "pi" or os.path.realpath(cwd) in wts:
-                        out.add(cwd)
-            except OSError:
-                pass
-    return out
+                wts.add(ln[9:].strip())
+    try:
+        return FL.live_worktrees(wts)
+    except (OSError, subprocess.SubprocessError):
+        FAILED.append("live worker detection")
+        return set()
 
 
-LIVE = live_agent_cwds()
-
-
-def meta_field(tid, key):
-    for ln in (read(f"{H}/state/{tid}.meta") or "").splitlines():
-        if ln.startswith(key + "="):
-            return ln.split("=", 1)[1].strip()
-    return ""
+LIVE = live_agent_worktrees()
 
 
 workers = []
@@ -346,11 +378,12 @@ for t in snap.get("tasks") or []:
         state = cs or "working"
     model = meta_field(tid, "model")
     effort = meta_field(tid, "effort")
-    key = worker_ticket(tid)
+    key = worker_ref(tid)
     pr = (t.get("pr") or {}).get("url") if isinstance(t.get("pr"), dict) else None
     if pr:
         prs.setdefault(key, {}).setdefault(pr, "open")
-    workers.append({"task": tid, "kind": t.get("kind"), "state": state, "live": live, "key": key,
+    workers.append({"task": tid, "kind": t.get("kind"), "state": state, "live": live, "key": key, "ticket": worker_ticket(tid),
+                    "repo": FL.task_repo(t, meta_field(tid, "repo"), REPOS) or (REPOS[0] if len(REPOS) == 1 else ""),
                     "model": (model + (" · " + effort if effort else "")) if model else "not reported",
                     "has_window": bool(meta_field(tid, "window")), "meta_pr": meta_field(tid, "pr") or ""})
 ACTIVE = sum(1 for w in workers if w["live"] and w["kind"] == "ship")
@@ -457,7 +490,8 @@ for it in qitems:
     if ln:
         by_lane[ln].append(it)
 removed = [it for it in qitems if it.get("state") == "removed"]
-if not BACKLOG_OK or backlog_queued:
+SHOW_QUEUE = not MAIN or os.path.exists(f"{H}/data/board/queue.json")
+if SHOW_QUEUE and (not BACKLOG_OK or backlog_queued):
     LANES.append(("backlog", "Backlog", "var(--line)", "queued in the backlog" if BACKLOG_OK else "source unreadable",
                   "Nothing queued" if BACKLOG_OK else "Backlog could not be read"))
     by_lane["backlog"] = [{"key": b["key"], "summary": b["title"], "state": "backlog"} for b in backlog_queued]
@@ -818,8 +852,8 @@ def now_band():
     tok = lambda d: sum(sum(v.values()) for v in (udays.get(d) or {}).values())
     gauge = "".join(f'<i class="{"on" if k < ACTIVE else ""}"></i>' for k in range(CAPACITY))
     tiles = [
-        ("fleet-block", "Workers running", f'{ACTIVE}<small> / {CAPACITY}</small>', f'<span class="gauge">{gauge}</span>',
-         esc(CAPG.get("reason") or "") + ((" · free " + str(CAPG.get("mem_available_mb")) + " MB") if CAPG.get("mem_available_mb") else "")),
+        ("fleet-block", "Workers running", f'{ACTIVE}<small> / {CAPACITY}</small>' if SHOW_CAP else str(ACTIVE), f'<span class="gauge">{gauge}</span>' if SHOW_CAP else "",
+         esc(CAPG.get("reason") or "") + ((" · free " + str(CAPG.get("mem_available_mb")) + " MB") if CAPG.get("mem_available_mb") else "") if SHOW_CAP else "live worker agents"),
         ("throughput-block", "Merged today", str(merged_by_day[today]), spark([merged_by_day[d] for d in days], "var(--purple)"), f"{m7} in the last 7 days · 14-day trend"),
         ("throughput-block", "PR open to merge", (f"{med:.1f}<small>h</small>" if med is not None else "—"), spark(med_series, "var(--teal)"), "median, last 7 days"),
         ("usage-block", "Tokens today", fmt_tok(tok(today)), spark([tok(d) for d in days], "var(--blue)"), "14-day trend"),
@@ -904,8 +938,12 @@ def throughput_html():
 
 
 # ---- fleet
+def repo_kv(w):
+    return f'<span>Repo</span><span class="mono">{esc(w["repo"])}</span>' if len(REPOS) > 1 and w.get("repo") else ""
+
+
 orch_strip = (f'<div class="orchline"><span class="dot live" style="background:var(--live)"></span><b>{esc(fleet.get("orchestrator_name") or "supervisor")}</b>'
-              f'<span class="mute">orchestrator · {esc(fleet.get("orchestrator_model") or "model not reported")} · reports to the captain · {ACTIVE} / {CAPACITY} ship slots</span></div>')
+              f'<span class="mute">orchestrator · {esc(fleet.get("orchestrator_model") or "model not reported")} · reports to the captain{f" · {ACTIVE} / {CAPACITY} ship slots" if SHOW_CAP else ""}</span></div>')
 fleet_html = ""
 stopped_rows = ""
 prefetch_pipelines(workers)
@@ -916,7 +954,7 @@ for w in sorted(workers, key=lambda w: (0 if w["live"] else _RANK.get(state_key(
     mp = re.search(r"/pull/(\d+)", w.get("meta_pr") or "")
     if mp and (not pr or pr["num"] != mp.group(1)):
         pr = dict(pr or {}, url=w["meta_pr"], num=mp.group(1))
-    tk = f'<a href="{JIRA}{esc(w["key"])}" target="_blank" rel="noopener">{esc(w["key"])}</a>' if w["key"] else "—"
+    tk = f'<a href="{JIRA}{esc(w["ticket"])}" target="_blank" rel="noopener">{esc(w["ticket"])}</a>' if w["ticket"] else "—"
     prc = f'<a href="{esc(pr["url"])}" target="_blank" rel="noopener">PR #{esc(pr["num"])}</a>' if pr else "—"
     _sk = state_key(w)
     _db = db_chip(db_change(w["task"]), (pr or {}).get("title", ""))
@@ -934,7 +972,7 @@ for w in sorted(workers, key=lambda w: (0 if w["live"] else _RANK.get(state_key(
                f'{state_pill(_sk)}</div>')
     fleet_html += (
         top + f'<div class="bname mono">{esc(w["task"])} {_db}</div>{_pf}'
-        f'<div class="kv"><span>Model</span><span class="mono">{esc(w["model"])}</span><span>Ticket</span>{tk}<span>PR</span><span>{prc}</span></div>{latest_section(w)}{_pp}</div>')
+        f'<div class="kv"><span>Model</span><span class="mono">{esc(w["model"])}</span>{repo_kv(w)}<span>Ticket</span>{tk}<span>PR</span><span>{prc}</span></div>{latest_section(w)}{_pp}</div>')
 if stopped_rows:
     stopped_html = (f'<details class="stopped" open><summary>Recently stopped workers ({stopped_rows.count("class=\"srow\"")})</summary>'
                     f'<div class="stab">{stopped_rows}</div></details>')
@@ -942,6 +980,32 @@ else:
     stopped_html = ""
 if not fleet_html:
     fleet_html = '<div class="empty" style="grid-column:1/-1">No workers running right now</div>'
+
+# ---- second mates (main home): one row each from the fleet snapshot's secondmate_current block
+BOARDS = FL.parse_boards(C.get("secondmate_boards"))
+SM_ROWS, SM_OMITTED = FL.secondmate_rows(snap, BOARDS)
+SHOW_SM = MAIN or bool(SM_ROWS)
+
+
+def secondmate_html():
+    if not SM_ROWS:
+        return '<div class="empty">No data: the fleet snapshot lists no second mates</div>'
+    nodata = '<span class="mute" title="the second mate\'s home could not be read">no data</span>'
+    num = lambda v, warn=False: nodata if v is None else (f'<b style="color:var(--amber)">{v}</b>' if warn and v else str(v))
+    rows = ""
+    for r in SM_ROWS:
+        name = esc(r["id"])
+        if r["url"]:
+            name = f'<a href="{esc(r["url"])}" target="_blank" rel="noopener" title="Open its own board">{name} \u2197</a>'
+        fresh = r["freshness"] + (f" \u00b7 {_age(r['age'])}" if r["age"] is not None else "")
+        rows += (f'<div class="smrow"><span class="smname">{name}</span><span>{state_pill(r["state"].lower())}</span>'
+                 f'<span data-l="Active">{num(r["active"])}</span><span data-l="Queued">{num(r["queued"])}</span>'
+                 f'<span data-l="Decisions">{num(r["decisions"], True)}</span><span data-l="Landed">{num(r["landed"])}</span>'
+                 f'<span class="mute">{esc(fresh)}{" \u00b7 partial" if r["partial"] else ""}</span></div>')
+    more = f'<div class="sn2" style="margin-top:6px">{SM_OMITTED} more second mate{"s" if SM_OMITTED != 1 else ""} not listed in the snapshot</div>' if SM_OMITTED else ""
+    return ('<div class="smtab"><div class="smh"><span>Second mate</span><span>State</span><span>Active</span><span>Queued</span><span>Decisions</span>'
+            f'<span>Landed</span><span>Data</span></div>{rows}</div>{more}')
+
 
 # ---- rules
 directive = read(f"{H}/data/prioritization.md") or ""
@@ -999,6 +1063,12 @@ rule_panes = [
     ("pr-links", "PR links", "how the board shows PRs", f'<p style="margin:0">{esc(pr_link_doc)}</p>', ""),
     ("rules-sync", "Rules sync", "rules %s · announced %s" % (rv.get("last_status") or "never run", ann.get("version") or "none"), sync_body, ""),
 ]
+if MAIN:  # only panes whose source file exists; the two static explainers describe the team-home ops scripts
+    _src = {"directive": ["prioritization.md"], "pr-protocol": ["pr-protocol.md"], "completeness": ["completeness-rule.md"],
+            "jira-style": ["jira-comment-style.md"], "slot-policy": ["slot-policy.md"],
+            "rules-sync": [f"{C.get('rules_dir')}/VERSIONS.json", f"{C.get('rules_sync_dir')}/README.md"]}
+    rule_panes = [p_ for p_ in rule_panes if any(os.path.exists(f"{H}/data/{f}") for f in _src.get(p_[0], []))]
+SHOW_RULES = bool(rule_panes)
 rules_nav = "".join(f'<button type="button" class="rn" data-rule="{rid}"{" aria-current=\"true\"" if n == 0 else ""}>{esc(title)}</button>'
                     for n, (rid, title, _m, _b, _w) in enumerate(rule_panes))
 rules_body = "".join(f'<div class="rp" id="rule-{rid}"{"" if n == 0 else " hidden"}><div class="rph"><h3>{esc(title)}</h3><span class="meta">{esc(meta)}</span></div>'
@@ -1097,6 +1167,8 @@ def cap_rows(html_rows, n=10):
     return "".join(rows[:n]) + f'<details class="showmore"><summary>Show {len(rows) - n} more</summary>{"".join(rows[n:])}</details>'
 
 
+SHOW_TICKETS = not MAIN or os.path.exists(f"{H}/data/board/tickets.jsonl")
+SHOW_EVENTS = not MAIN or os.path.exists(f"{H}/data/board/events.jsonl")
 handled = cap_rows(handled)
 qev = cap_rows(qev)
 
@@ -1187,6 +1259,11 @@ section{scroll-margin-top:56px}#stats{scroll-margin-top:56px}.showmore summary{c
 .trow{display:grid;grid-template-columns:90px 150px minmax(0,1fr) 70px;gap:12px;align-items:center;padding:6px 0;font-size:13px}.tsub{color:var(--mute);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tbar{display:flex;height:10px;border-radius:5px;background:var(--panel2);overflow:hidden}.tbar i{display:block;height:100%}.tval{text-align:right;font-variant-numeric:tabular-nums}
 @media (max-width:760px){.trow{grid-template-columns:80px 1fr 60px}.tsub{display:none}}
 .dbchip{display:inline-block;font:600 11px/1.6 system-ui,sans-serif;padding:0 7px;border-radius:999px;background:#f59e0b22;color:#b45309;border:1px solid #f59e0b88;vertical-align:middle;margin-left:6px}
+.smtab{border:1px solid var(--line);border-radius:16px;background:var(--panel);overflow:hidden}
+.smh,.smrow{display:grid;grid-template-columns:minmax(0,1.4fr) 110px repeat(4,72px) minmax(120px,1fr);gap:12px;padding:12px 18px;align-items:center;font-size:13px}
+.smh{padding:10px 18px;font-size:12px;color:var(--mute);background:var(--panel2);border-bottom:1px solid var(--line)}.smrow{border-bottom:1px solid var(--line)}.smrow:last-child{border-bottom:0}
+.smname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}.smrow .bpill{margin-left:0}
+@media (max-width:760px){.smh{display:none}.smrow{grid-template-columns:repeat(4,minmax(0,1fr))}.smrow .smname,.smrow .mute:last-child{grid-column:1/-1}.smrow>span[data-l]::before{content:attr(data-l) " ";display:block;font-size:11px;color:var(--mute)}}
 .tpgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media (max-width:900px){.tpgrid{grid-template-columns:1fr}}
 .bpill{margin-left:0;justify-self:start}.swhy{color:var(--mute)}
 @media (max-width:760px){.srow{grid-template-columns:1fr auto;gap:4px 10px}.srow .swhy{grid-column:1/-1}}
@@ -1269,7 +1346,7 @@ JS = r"""
    return r.json().then(function(j){if(!r.ok)throw new Error(j.error||r.status);return j;});});
  }
  var curRule='directive';try{curRule=localStorage.getItem('board-rule')||curRule;}catch(e){}
- function showRule(id){var b=document.querySelector('.rn[data-rule="'+id+'"]');if(!b){id='directive';b=document.querySelector('.rn[data-rule="directive"]');}if(!b)return;curRule=id;
+ function showRule(id){var b=document.querySelector('.rn[data-rule="'+id+'"]');if(!b){b=document.querySelector('.rn');if(!b)return;id=b.dataset.rule;}curRule=id;
   document.querySelectorAll('.rn').forEach(function(x){x.setAttribute('aria-current',x===b?'true':'false');});
   document.querySelectorAll('.rp').forEach(function(p){p.hidden=(p.id!=='rule-'+id);});try{localStorage.setItem('board-rule',id);}catch(e){}}
  document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.rn');if(b)showRule(b.dataset.rule);});
@@ -1278,7 +1355,7 @@ JS = r"""
  function setQ(v){qv=v;document.querySelectorAll('.qpane').forEach(function(p){p.hidden=(p.dataset.pane!==v);});document.querySelectorAll('[data-qview]').forEach(function(b){b.setAttribute('aria-pressed',b.dataset.qview===v?'true':'false');});try{localStorage.setItem('board-qview',v);}catch(e){}}
  document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-qview]');if(b){setQ(b.dataset.qview);return;}var m=e.target.closest&&e.target.closest('.morelink');if(m){e.preventDefault();setQ('table');document.getElementById('queue-block').scrollIntoView();}});
  setQ(qv);
- var SWAP=['refreshed','stats','fleet-block','throughput-block','queue-block','usage-block','rules-block','logs-block'];
+ var SWAP=['refreshed','stats','fleet-block','secondmates-block','throughput-block','queue-block','usage-block','rules-block','logs-block'];
  function swap(){
   return fetch(location.pathname+'?_='+Date.now(),{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.text();}).then(function(t){
    var doc=new DOMParser().parseFromString(t,'text/html');
@@ -1322,6 +1399,25 @@ JS = r"""
 })();
 """
 
+repo_links = " \u00b7 ".join(f'<a href="https://github.com/{r_}" target="_blank" rel="noopener">{r_}</a>' for r_ in REPOS)
+repo_links = ("repos " if len(REPOS) > 1 else "repo ") + repo_links
+signout = "" if MAIN else '<a class="signout" href="/api/signout">sign out</a>'
+nav_items = [("stats", "Now", True), ("fleet-block", "Fleet", True), ("secondmates-block", "Second mates", SHOW_SM), ("throughput-block", "Throughput", True),
+             ("queue-block", "Queue", SHOW_QUEUE), ("usage-block", "Usage", True),
+             ("logs-block", "History", not MAIN or SHOW_TICKETS or SHOW_EVENTS), ("rules-block", "Rules", SHOW_RULES)]
+nav_html = '<nav class="secnav" aria-label="Sections">' + "".join(f'<a href="#{i_}">{n_}</a>' for i_, n_, on_ in nav_items if on_) + "</nav>"
+secondmates_section = (f'<section id="secondmates-block"><div class="sh"><h2>Second mates</h2><div class="sn">from the fleet snapshot'
+                       f'{" \u00b7 a name links to that second mate\'s own board" if BOARDS else ""}</div></div>{secondmate_html()}</section>') if SHOW_SM else ""
+queue_section = f'''<section id="queue-block"><div class="sh"><h2>Queue</h2><div class="sn">Top of <em>Ranked next</em> is picked when a slot frees \u00b7 order saved <span class="mono">{esc(order_saved)}</span> \u00b7 <span id="qmsg" style="color:var(--ink)">changes save immediately</span></div></div>
+<div class="qview" role="tablist"><button type="button" data-qview="board" aria-pressed="true">Board</button><button type="button" data-qview="table" aria-pressed="false">Table \u00b7 {len(full_rows)}</button></div>
+<div class="lanes qpane" data-pane="board">{''.join(lane_html)}</div><div class="qpane" data-pane="table" hidden><div class="ftab"><div class="fh"><span>#</span><span>Ticket</span><span>MS</span><span>Summary</span><span>State</span><span>PR</span><span>Tokens</span><span>Reorder</span></div>{''.join(full_rows)}</div>{removed_html}</div>
+<script>window.__ranked={json.dumps(ranked_keys)};window.__all={json.dumps(all_keys)};</script></section>''' if SHOW_QUEUE else ""
+logs_section = ('<section id="logs-block"><div class="logs">'
+                + (f'<div class="lg"><h2>Tickets handled by this team</h2><div class="lbox">{handled}</div></div>' if SHOW_TICKETS else "")
+                + (f'<div class="lg"><h2>Queue events</h2><div class="lbox">{qev}</div></div>' if SHOW_EVENTS else "")
+                + "</div></section>") if (SHOW_TICKETS or SHOW_EVENTS) else ""
+rules_section = f'<section id="rules-block"><h2>Rules</h2>{rules_html}</section>' if SHOW_RULES else ""
+
 page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <noscript><meta http-equiv="refresh" content="300"></noscript>
 <title>{esc(C.get('title'))}</title>
@@ -1331,22 +1427,19 @@ page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name
 <style>{CSS}</style></head><body>
 <div class="page">
 <header><div class="hl"><div class="eyebrow"><i></i>{esc(C.get('title'))}</div><h1>{esc(C.get('subtitle'))}</h1>
-<div class="hm"><span>repo <a href="https://github.com/{REPO}" target="_blank" rel="noopener">{REPO}</a></span><span>merges are human-only</span>
+<div class="hm"><span>{repo_links}</span><span>merges are human-only</span>
 <span id="refreshed" class="liveind" data-at="{int(now.timestamp())}"><i></i>live · refreshed <span class="ts2">{now.strftime('%H:%M:%S')} UTC</span> <span class="ago"></span></span>
-<span class="th">theme <button data-theme-set="auto">auto</button><button data-theme-set="dark">dark</button><button data-theme-set="light">light</button></span><a class="signout" href="/api/signout">sign out</a></div></div>
+<span class="th">theme <button data-theme-set="auto">auto</button><button data-theme-set="dark">dark</button><button data-theme-set="light">light</button></span>{signout}</div></div>
 <div class="stats" id="stats">{now_band()}</div></header>
 {problem}
-<nav class="secnav" aria-label="Sections"><a href="#stats">Now</a><a href="#fleet-block">Fleet</a><a href="#throughput-block">Throughput</a><a href="#queue-block">Queue</a><a href="#usage-block">Usage</a><a href="#logs-block">History</a><a href="#rules-block">Rules</a></nav>
+{nav_html}
 <section id="fleet-block"><div class="sh"><h2>Fleet</h2><div class="sn">{stale_state}</div></div>{orch_strip}<div class="fleet">{fleet_html}</div>{stopped_html}</section>
+{secondmates_section}
 <section id="throughput-block"><div class="sh"><h2>Throughput</h2><div class="sn">from GitHub, last 14 days</div></div>{throughput_html()}</section>
-<section id="queue-block"><div class="sh"><h2>Queue</h2><div class="sn">Top of <em>Ranked next</em> is picked when a slot frees · order saved <span class="mono">{esc(order_saved)}</span> · <span id="qmsg" style="color:var(--ink)">changes save immediately</span></div></div>
-<div class="qview" role="tablist"><button type="button" data-qview="board" aria-pressed="true">Board</button><button type="button" data-qview="table" aria-pressed="false">Table · {len(full_rows)}</button></div>
-<div class="lanes qpane" data-pane="board">{''.join(lane_html)}</div><div class="qpane" data-pane="table" hidden><div class="ftab"><div class="fh"><span>#</span><span>Ticket</span><span>MS</span><span>Summary</span><span>State</span><span>PR</span><span>Tokens</span><span>Reorder</span></div>{''.join(full_rows)}</div>{removed_html}</div>
-<script>window.__ranked={json.dumps(ranked_keys)};window.__all={json.dumps(all_keys)};</script></section>
+{queue_section}
 <section id="usage-block"><div class="sh"><h2>Usage</h2><div class="sn">tokens per day, stacked by provider</div></div>{usage_block}</section>
-<section id="logs-block"><div class="logs"><div class="lg"><h2>Tickets handled by this team</h2><div class="lbox">{handled}</div></div>
-<div class="lg"><h2>Queue events</h2><div class="lbox">{qev}</div></div></div></section>
-<section id="rules-block"><h2>Rules</h2>{rules_html}</section>
+{logs_section}
+{rules_section}
 </div><script>{JS}</script></body></html>"""
 
 tmp = OUT + ".tmp"
